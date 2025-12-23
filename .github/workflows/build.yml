@@ -1,0 +1,161 @@
+name: build-one
+
+on:
+  workflow_dispatch:
+    inputs:
+      dependency:
+        description: 'Dependency to build (name of script in deps/)'
+        required: true
+        type: string
+      distro:
+        description: 'Target distribution'
+        required: true
+        default: 'debian-bookworm'
+        type: choice
+        options:
+          # Debian (oldest to newest)
+          - debian-stretch
+          - debian-buster
+          - debian-bullseye
+          - debian-bookworm
+          - debian-trixie
+          # Ubuntu (oldest to newest)
+          - ubuntu-xenial
+          - ubuntu-bionic
+          - ubuntu-focal
+          - ubuntu-jammy
+          - ubuntu-noble
+
+  workflow_call:
+    inputs:
+      dependency:
+        description: 'Dependency to build (name of script in deps/)'
+        required: true
+        type: string
+      distro:
+        description: 'Target distribution'
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: ${{ inputs.dependency }} / ${{ inputs.distro }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            tree \
+            python3 \
+            pkg-config \
+            autoconf \
+            automake \
+            libtool \
+            make \
+            bison \
+            flex \
+            gettext \
+            git \
+            curl \
+            wget \
+            jq \
+            gperf
+
+      - name: Read tool config from tools.json
+        id: tools
+        run: |
+          echo "llvm_version=$(jq -r '.llvm.version' tools.json)" >> $GITHUB_OUTPUT
+          echo "llvm_url=$(jq -r '.llvm.url' tools.json)" >> $GITHUB_OUTPUT
+          echo "ninja_url=$(jq -r '.ninja.url' tools.json)" >> $GITHUB_OUTPUT
+          echo "cmake_url=$(jq -r '.cmake.url' tools.json)" >> $GITHUB_OUTPUT
+          echo "cmake_version=$(jq -r '.cmake.version' tools.json)" >> $GITHUB_OUTPUT
+          echo "meson_version=$(jq -r '.meson.version' tools.json)" >> $GITHUB_OUTPUT
+          echo "meson_url=$(jq -r '.meson.url' tools.json)" >> $GITHUB_OUTPUT
+
+      - name: Cache build tools
+        id: cache-tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            /opt/llvm
+            /opt/cmake
+            /opt/meson
+            /opt/ninja
+          key: build-tools-${{ hashFiles('tools.json') }}
+
+      - name: Download and install LLVM
+        if: steps.cache-tools.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL "${{ steps.tools.outputs.llvm_url }}" | tar -xJ
+          sudo mv "LLVM-${{ steps.tools.outputs.llvm_version }}-Linux-X64" /opt/llvm
+
+      - name: Download and install Ninja
+        if: steps.cache-tools.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL "${{ steps.tools.outputs.ninja_url }}" -o ninja.zip
+          unzip -q ninja.zip
+          sudo mkdir -p /opt/ninja
+          sudo mv ninja /opt/ninja/ninja
+          rm ninja.zip
+
+      - name: Download and install CMake
+        if: steps.cache-tools.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL "${{ steps.tools.outputs.cmake_url }}" | tar -xz
+          sudo mv cmake-${{ steps.tools.outputs.cmake_version }}-linux-x86_64 /opt/cmake
+
+      - name: Download and install Meson
+        if: steps.cache-tools.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL "${{ steps.tools.outputs.meson_url }}" | tar -xz
+          sudo mv "meson-${{ steps.tools.outputs.meson_version }}" /opt/meson
+
+      - name: Setup tool symlinks
+        run: |
+          # LLVM
+          sudo ln -sf /opt/llvm/bin/clang /usr/local/bin/clang
+          sudo ln -sf /opt/llvm/bin/clang++ /usr/local/bin/clang++
+          sudo ln -sf /opt/llvm/bin/ld.lld /usr/local/bin/ld.lld
+          sudo ln -sf /opt/llvm/bin/lld /usr/local/bin/lld
+          sudo ln -sf /opt/llvm/bin/llvm-ar /usr/local/bin/llvm-ar
+          sudo ln -sf /opt/llvm/bin/llvm-ranlib /usr/local/bin/llvm-ranlib
+          sudo ln -sf /opt/llvm/bin/llvm-nm /usr/local/bin/llvm-nm
+          sudo ln -sf /opt/llvm/bin/llvm-objcopy /usr/local/bin/llvm-objcopy
+          sudo ln -sf /opt/llvm/bin/llvm-objdump /usr/local/bin/llvm-objdump
+          sudo ln -sf /opt/llvm/bin/llvm-strip /usr/local/bin/llvm-strip
+          # Ninja
+          sudo ln -sf /opt/ninja/ninja /usr/local/bin/ninja
+          # CMake
+          sudo ln -sf /opt/cmake/bin/cmake /usr/local/bin/cmake
+          sudo ln -sf /opt/cmake/bin/ctest /usr/local/bin/ctest
+          sudo ln -sf /opt/cmake/bin/cpack /usr/local/bin/cpack
+          # Meson
+          echo '#!/bin/sh' | sudo tee /usr/local/bin/meson > /dev/null
+          echo 'exec python3 /opt/meson/meson.py "$@"' | sudo tee -a /usr/local/bin/meson > /dev/null
+          sudo chmod +x /usr/local/bin/meson
+
+      - name: Setup sysroot (${{ inputs.distro }})
+        run: |
+          ./sysroots/setup.sh ${{ inputs.distro }}
+
+      - name: Build ${{ inputs.dependency }} (${{ inputs.distro }})
+        run: |
+          TARGET_DISTRO=${{ inputs.distro }} \
+          TARGET_ARCH=x86_64 \
+          ./deps/${{ inputs.dependency }}.sh
+
+      - name: Verify build (${{ inputs.dependency }} on ${{ inputs.distro }})
+        run: |
+          tree -la out/${{ inputs.distro }}/prefix
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.dependency }}-${{ inputs.distro }}
+          path: |
+            out/${{ inputs.distro }}/prefix
+          retention-days: 10
